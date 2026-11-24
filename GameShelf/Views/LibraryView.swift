@@ -14,14 +14,9 @@ struct LibraryView: View {
     @State private var filter: LibFilter = .all
     /// 可导入的容器：zip / apk，以及 7z
     private static let importableTypes: [UTType] = {
-        // 只给 [.zip, .data] 不够：设备上没装过声明 apk / 7z 这类扩展名的应用时，
-        // 系统给这些文件分配的是动态 UTI，不落在 .data 的一致性范围内，
-        // 文件在选择器里会变灰、点不中。支持的扩展名逐个换成 UTType 一起传进去。
         var types: [UTType] = [.zip, .data]
-        for ext in ["7z", "apk", "xapk", "apks"] {
-            if let type = UTType(filenameExtension: ext) {
-                types.insert(type, at: 0)
-            }
+        if let sevenZip = UTType(filenameExtension: "7z") {
+            types.insert(sevenZip, at: 0)
         }
         return types
     }()
@@ -76,19 +71,14 @@ struct LibraryView: View {
                     importingOverlay
                 }
             }
-            .fileImporter(
-                isPresented: $showImporter,
-                allowedContentTypes: Self.importableTypes,
-                allowsMultipleSelection: true
-            ) { result in
-                switch result {
-                case .success(let urls):
-                    // 和 APK 完全一样的处理：直接入队，由 GameStore 按扩展名挑归档实现。
-                    // 不额外拷贝、不经 Inbox、不做文件协调——那条更复杂的路反而会失败。
+            .sheet(isPresented: $showImporter) {
+                // 不用 fileImporter：它走原地打开，自签安装时校验链会断、
+                // 文件看得见却点不动。DocumentPicker 是拷贝模式，见它的注释。
+                DocumentPicker(
+                    contentTypes: Self.importableTypes,
+                    allowsMultipleSelection: true
+                ) { urls in
                     enqueue(urls)
-                case .failure(let error):
-                    store.lastError = error.localizedDescription
-                    showError = true
                 }
             }
             .sheet(item: $selected) { game in

@@ -135,18 +135,10 @@ struct GameDetailView: View {
                 onClear: { clearTranslation() }
             )
         }
-        .fileImporter(
-            isPresented: $showTransImporter,
-            allowedContentTypes: [.json]
-        ) { result in
-            switch result {
-            case .success(let url):
-                importTranslation(url)
-            case .failure(let error):
-                let code = (error as NSError).code
-                if code != NSUserCancelledError {
-                    transError = error.localizedDescription
-                }
+        .sheet(isPresented: $showTransImporter) {
+            // 同 LibraryView：拷贝模式的选择器，避免自签环境下原地打开点不动。
+            DocumentPicker(contentTypes: [.json]) { urls in
+                if let url = urls.first { importTranslation(url) }
             }
         }
         .alert("翻译没有挂上", isPresented: Binding(
