@@ -14,9 +14,14 @@ struct LibraryView: View {
     @State private var filter: LibFilter = .all
     /// 可导入的容器：zip / apk，以及 7z
     private static let importableTypes: [UTType] = {
+        // 只给 [.zip, .data] 不够：设备上没装过声明 apk / 7z 这类扩展名的应用时，
+        // 系统给这些文件分配的是动态 UTI，不落在 .data 的一致性范围内，
+        // 文件在选择器里会变灰、点不中。支持的扩展名逐个换成 UTType 一起传进去。
         var types: [UTType] = [.zip, .data]
-        if let sevenZip = UTType(filenameExtension: "7z") {
-            types.insert(sevenZip, at: 0)
+        for ext in ["7z", "apk", "xapk", "apks"] {
+            if let type = UTType(filenameExtension: ext) {
+                types.insert(type, at: 0)
+            }
         }
         return types
     }()
