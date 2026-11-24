@@ -46,13 +46,52 @@ enum PackageInspector {
     /// `assets/apps/<id>/www/` 之类动态目录误当成唯一候选。
     private static let wwwRoots = ["", "assets/www/", "assets/game/", "assets/html/", "assets/web/"]
 
+    /// 包内常见的「不是游戏」目录：下载站的广告壳、说明文件、推广页、破解组页。
+    /// 这些壳里也常带一个 index.html，不排掉就会被当成候选根。
+    private static let junkTokens = [
+        "广告", "更多", "下载", "安装说明", "使用说明", "说明", "必读", "注意", "破解",
+        "网址", "公众号", "关注", "站长", "推广", "充值", "赞助", "反馈", "解压密码",
+        "ad", "ads", "advert", "promo", "sponsor", "readme", "help", "install"
+    ]
+
+    /// 只看路径里的**目录段**，文件名不参与判断——否则 `下载的游戏.exe` 会误伤整个根。
+    private static func isJunk(_ path: String) -> Bool {
+        let lower = path.lowercased()
+        if lower.hasPrefix("__macosx") || lower.hasSuffix(".ds_store") { return true }
+        for segment in lower.split(separator: "/") {
+            let seg = String(segment)
+            if seg.isEmpty { continue }
+            if junkTokens.contains(where: { seg.contains($0) }) { return true }
+        }
+        return false
+    }
+
+    /// 给候选根打分：引擎脚本是决定性信号，其次是入口与资源目录。
+    private static func score(root: String, has: (String) -> Bool) -> Int {
+        var score = 0
+        if has(root + "js/rmmz_core.js") || has(root + "js/rmmz_managers.js")
+            || has(root + "js/rpg_core.js") || has(root + "js/rpg_managers.js") {
+            score += 100                      // RPG Maker 的引擎脚本，基本不会认错
+        }
+        if has(root + "index.html") { score += 40 }
+        if has(root + "data/System.json") || has(root + "www/index.html") { score += 25 }
+        if has(root + "img/") || has(root + "audio/") || has(root + "fonts/")
+            || has(root + "assets/") || has(root + "img/pictures/") {
+            score += 15
+        }
+        if has(root + "data/System.json") { score += 10 }
+        return score
+    }
+
     /// 动态扫描包里所有可能的网页工程根。
     ///
     /// 策略：
     /// 1. 固定前缀（`wwwRoots`）里含 `index.html` 的直接作为候选（保持旧行为优先级）。
     /// 2. 额外扫全包：任何含 `index.html` 的目录、或含 `js/rpg_core.js` / `js/rmmz_core.js`
     ///    的目录，都算一个候选根（DCloud 壳的 `assets/apps/*/www/` 就靠这步兜到）。
-    /// 3. 去重 + 按「目录深度」排序（浅的排前），返回给 UI 选择。
+    /// 3. 排掉广告壳（`isJunk`）、按信号打分；**明显只有一个真游戏时直接定它**，
+    ///    分数接近才把候选交回给用户选。
+    /// 4. 排序：分数高的在前，同分取目录浅的。
     static func scanRoots(_ reader: ZipReader) -> [RootCandidate] {
         let names = reader.entries.map { $0.name }
         let lower = names.map { $0.lowercased() }
@@ -64,15 +103,17 @@ enum PackageInspector {
         var rootSet = Set<String>()
 
         // 固定前缀优先
-        for candidate in wwwRoots where has(candidate + "index.html") {
+        for candidate in wwwRoots where has(candidate + "index.html") && !isJunk(candidate) {
             rootSet.insert(candidate)
         }
 
         // 动态扫描：凡是有 index.html 或 MV/MZ 核心脚本的目录都算一个根
         for name in names {
-            let isIndex = name.hasSuffix("/index.html") || name == "index.html"
-            let isEngine = name.hasSuffix("/js/rpg_core.js") || name.hasSuffix("/js/rpg_managers.js")
-                || name.hasSuffix("/js/rmmz_core.js") || name.hasSuffix("/js/rmmz_managers.js")
+            guard !isJunk(name) else { continue }
+            let l = name.lowercased()
+            let isIndex = l.hasSuffix("/index.html") || l == "index.html"
+            let isEngine = l.hasSuffix("/js/rpg_core.js") || l.hasSuffix("/js/rpg_managers.js")
+                || l.hasSuffix("/js/rmmz_core.js") || l.hasSuffix("/js/rmmz_managers.js")
             guard isIndex || isEngine else { continue }
             var dir = (name as NSString).deletingLastPathComponent
             // 引擎脚本在 <root>/js/ 下，根要去掉末尾的 "js/"
@@ -80,14 +121,26 @@ enum PackageInspector {
                 dir = (dir as NSString).deletingLastPathComponent
             }
             let root = dir.isEmpty ? "" : dir + "/"
+            guard !isJunk(root) else { continue }
             rootSet.insert(root)
         }
 
-        // 转成候选并识别引擎
-        var candidates: [RootCandidate] = []
+        // 转成候选并按信号打分
+        var scored: [(candidate: RootCandidate, score: Int)] = []
         for root in rootSet {
-            let entryFile = has(root + "index.html") ? root + "index.html"
-                : (names.first { $0.hasPrefix(root) && ($0.hasSuffix(".html") || $0.hasSuffix(".htm")) } ?? (root + "index.html"))
+            let entryFile: String = {
+                if has(root + "index.html") { return root + "index.html" }
+                // 没有 index.html 时取该根下最浅的那个 html，避免挑到广告页
+                let html = names
+                    .filter { $0.hasPrefix(root) && ($0.hasSuffix(".html") || $0.hasSuffix(".htm")) }
+                    .min { a, b in
+                        let da = a.filter { $0 == "/" }.count
+                        let db = b.filter { $0 == "/" }.count
+                        return da == db ? a < b : da < db
+                    }
+                return html ?? (root + "index.html")
+            }()
+
             let engine: GameEngine
             if has(root + "js/rmmz_core.js") || has(root + "js/rmmz_managers.js") {
                 engine = .mz
@@ -96,20 +149,36 @@ enum PackageInspector {
             } else {
                 engine = .web
             }
-            candidates.append(RootCandidate(
-                root: root,
-                entryFile: entryFile,
-                engine: engine,
-                summary: root.isEmpty ? "包根目录" : root
+
+            scored.append((
+                RootCandidate(
+                    root: root,
+                    entryFile: entryFile,
+                    engine: engine,
+                    summary: root.isEmpty ? "包根目录" : root
+                ),
+                score(root: root, has: has)
             ))
         }
 
-        return candidates.sorted {
-            let d0 = $0.root.filter { $0 == "/" }.count
-            let d1 = $1.root.filter { $0 == "/" }.count
+        scored.sort { a, b in
+            if a.score != b.score { return a.score > b.score }
+            let d0 = a.candidate.root.filter { $0 == "/" }.count
+            let d1 = b.candidate.root.filter { $0 == "/" }.count
             if d0 != d1 { return d0 < d1 }
-            return $0.root < $1.root
+            return a.candidate.root < b.candidate.root
         }
+
+        // 只有一个根说得过去时直接定它；分数咬得紧（差距 ≤ 15）才让用户选
+        guard let first = scored.first else { return [] }
+        let contenders = scored.filter { first.score - $0.score <= 15 && $0.score >= 25 }
+        if contenders.count <= 1 { return [first.candidate] }
+        return contenders.map { $0.candidate }
+    }
+
+    /// 包里有没有加密条目。只看中央目录的标志位，不需要密码。
+    static func requiresPassword(_ reader: ZipReader) -> Bool {
+        reader.entries.contains { $0.isEncrypted }
     }
 
     static func inspect(_ reader: ZipReader, forcedRoot: String? = nil) -> Inspection {

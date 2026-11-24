@@ -73,6 +73,9 @@ final class GameStore: ObservableObject {
     /// 导入时发现包内有多个网页工程入口，需要用户选择。非空时 UI 弹选择器。
     @Published var pendingRootChoice: (url: URL, candidates: [RootCandidate])?
 
+    /// 加密包：等用户输密码。`failed` 为真表示上一次输错了，UI 用红字提示。
+    @Published var passwordPrompt: (url: URL, failed: Bool)?
+
     private let fm = FileManager.default
 
     var documentsURL: URL {
@@ -285,26 +288,62 @@ final class GameStore: ObservableObject {
 
     // MARK: - 导入
 
+    /// 加密包用的密码：输完一次后留在内存里，切根目录再导入时不用重输。
+    private var pendingPassword: String?
+
     func importPackage(at url: URL, progress: (@Sendable (ImportProgress) -> Void)? = nil) {
         guard !phase.isBusy else { return }
 
         // 先扫一遍包里的网页工程根，多个候选时先让用户选，选完再走真正的解包。
         Task {
-            let candidates = await Task.detached(priority: .userInitiated) {
-                // fileImporter 给的是安全作用域 URL，离开回调后必须先取权限，
-                // 否则大包在「扫描包结构」这一步就已经读不到了。
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                guard let reader = try? ZipReader(url: url) else { return [] as [RootCandidate] }
-                return PackageInspector.scanRoots(reader)
-            }.value
+            let scan = await Task.detached(priority: .userInitiated) { Self.scan(url) }.value
 
-            if candidates.count > 1 {
-                pendingRootChoice = (url, candidates)
+            if scan.needsPassword {
+                phase = .idle
+                passwordPrompt = (url, false)
                 return
             }
-            startImport(at: url, root: nil, progress: progress)
+            if scan.candidates.count > 1 {
+                pendingRootChoice = (url, scan.candidates)
+                return
+            }
+            startImport(at: url, root: scan.candidates.first?.root, password: nil, progress: progress)
         }
+    }
+
+    /// 用户在密码框里提交后继续导入。
+    func submitPassword(_ password: String,
+                        progress: (@Sendable (ImportProgress) -> Void)? = nil) {
+        guard let prompt = passwordPrompt else { return }
+        let url = prompt.url
+        passwordPrompt = nil
+        pendingPassword = password
+
+        Task {
+            let scan = await Task.detached(priority: .userInitiated) { Self.scan(url) }.value
+            if scan.candidates.count > 1 {
+                pendingRootChoice = (url, scan.candidates)
+                return
+            }
+            startImport(at: url, root: scan.candidates.first?.root, password: password, progress: progress)
+        }
+    }
+
+    /// 取消密码输入：什么都不做，把提示关掉。
+    func cancelPassword() {
+        passwordPrompt = nil
+        pendingPassword = nil
+        phase = .idle
+    }
+
+    /// 打开包并扫描：是否需要密码、有哪些可导入的根。
+    nonisolated private static func scan(_ url: URL) -> (needsPassword: Bool, candidates: [RootCandidate]) {
+        // fileImporter 给的是安全作用域 URL，离开回调后必须先取权限，
+        // 否则大包在「扫描包结构」这一步就已经读不到了。
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let reader = try? ZipReader(url: url) else { return (false, []) }
+        return (PackageInspector.requiresPassword(reader), PackageInspector.scanRoots(reader))
     }
 
     /// 用户在多个候选里选定了某个根之后，从这里继续真正的导入。
@@ -312,10 +351,10 @@ final class GameStore: ObservableObject {
                        progress: (@Sendable (ImportProgress) -> Void)? = nil) {
         guard !phase.isBusy else { return }
         pendingRootChoice = nil
-        startImport(at: url, root: chosen.root, progress: progress)
+        startImport(at: url, root: chosen.root, password: pendingPassword, progress: progress)
     }
 
-    private func startImport(at url: URL, root: String?,
+    private func startImport(at url: URL, root: String?, password: String?,
                              progress: (@Sendable (ImportProgress) -> Void)?) {
         let name = url.lastPathComponent
         phase = .reading(name)
@@ -335,7 +374,8 @@ final class GameStore: ObservableObject {
         Task {
             do {
                 let (record, icon) = try await Task.detached(priority: .userInitiated) {
-                    try Self.process(url: url, into: gamesRoot, rootOverride: root, progress: reporter)
+                    try Self.process(url: url, into: gamesRoot, rootOverride: root,
+                                     password: password, progress: reporter)
                 }.value
 
                 // 从没启动过的游戏，封面先用 APK 的启动图标；退出时会被最后一帧覆盖
@@ -345,6 +385,7 @@ final class GameStore: ObservableObject {
                 games.insert(record, at: 0)
                 persist()
                 phase = .idle
+                pendingPassword = nil
                 // 源包在自己沙盒里就删掉，避免重复提示与双份占用
                 if url.path.hasPrefix(documentsURL.path) {
                     try? FileManager.default.removeItem(at: url)
@@ -352,6 +393,15 @@ final class GameStore: ObservableObject {
             } catch let rejected as PackageRejected {
                 phase = .failed("\(rejected.title)：\(rejected.reason)")
                 lastError = "\(rejected.title)\n\n\(rejected.reason)"
+            } catch ZipError.wrongPassword {
+                // 密码错不是「解压失败」：把输入框再弹出来，让用户直接重输
+                phase = .idle
+                pendingPassword = nil
+                passwordPrompt = (url, true)
+            } catch ZipError.passwordRequired {
+                phase = .idle
+                pendingPassword = nil
+                passwordPrompt = (url, false)
             } catch {
                 phase = .failed(error.localizedDescription)
                 lastError = error.localizedDescription
@@ -403,6 +453,7 @@ final class GameStore: ObservableObject {
         url: URL,
         into gamesRoot: URL,
         rootOverride: String? = nil,
+        password: String? = nil,
         progress: @escaping @Sendable (ImportProgress) -> Void
     ) throws -> (GameRecord, Data?) {
         let fm = FileManager.default
@@ -418,6 +469,7 @@ final class GameStore: ObservableObject {
         }
 
         let reader = try ZipReader(url: url)
+        reader.password = password
         let result = PackageInspector.inspect(reader, forcedRoot: rootOverride)
 
         do {

@@ -2,12 +2,25 @@ import Foundation
 
 struct ZipEntry {
     let name: String
+    /// 实际压缩方式：0 存储 / 8 deflate。AES 条目在目录里写的是 99，
+    /// 真实方法藏在 0x9901 扩展字段里，这里已经换回来。
     let method: UInt16
+    /// 目录里记录的压缩后大小。AES 条目包含 salt + 2 字节校验值 + 10 字节 MAC。
     let compressedSize: Int
     let uncompressedSize: Int
     let localHeaderOffset: Int
+    let flags: UInt16
+    let crc32: UInt32
+    let dosTime: UInt16
+    /// 非 nil 表示 WinZip AES，值为密钥位数（128 / 192 / 256）
+    let aesKeyBits: Int?
 
     var isDirectory: Bool { name.hasSuffix("/") }
+    var isEncrypted: Bool { flags & 0x0001 != 0 }
+    var isAES: Bool { aesKeyBits != nil }
+
+    /// AES 的额外开销：salt + 2 字节密码校验 + 10 字节 HMAC
+    var aesOverhead: Int { (aesKeyBits == 256 ? 16 : 8) + 2 + 10 }
 }
 
 enum ZipError: LocalizedError {
@@ -16,6 +29,9 @@ enum ZipError: LocalizedError {
     case badEntry(String)
     case unsupportedMethod(UInt16)
     case inflateFailed(String)
+    case passwordRequired
+    case wrongPassword
+    case unsupportedCipher
 
     var errorDescription: String? {
         switch self {
@@ -24,6 +40,9 @@ enum ZipError: LocalizedError {
         case .badEntry(let name): return "条目损坏：\(name)"
         case .unsupportedMethod(let m): return "不支持的压缩方式（method \(m)）"
         case .inflateFailed(let name): return "解压失败：\(name)"
+        case .passwordRequired: return "压缩包已加密，需要输入密码"
+        case .wrongPassword: return "密码不正确"
+        case .unsupportedCipher: return "不是有效的 zip / apk 文件（不支持的加密方式）"
         }
     }
 }
@@ -37,6 +56,9 @@ final class ZipReader {
     private let handle: FileHandle
     private let fileSize: Int
     private(set) var entries: [ZipEntry] = []
+
+    /// 加密包的密码。导入前由调用方设进来；为 nil 时读到加密条目会抛 `.passwordRequired`。
+    var password: String?
 
     private static let gb18030 = String.Encoding(
         rawValue: CFStringConvertEncodingToNSStringEncoding(
@@ -148,7 +170,10 @@ final class ZipReader {
             let header = try readBytes(at: cursor, count: 46)
             guard Self.u32(header, 0) == 0x0201_4B50 else { throw ZipError.truncated }
 
-            let method = Self.u16(header, 10)
+            let recordedMethod = Self.u16(header, 10)
+            let dosTime = Self.u16(header, 12)
+            let crc = Self.u32(header, 16)
+            let flags = Self.u16(header, 8)
             var compSize = Int(Self.u32(header, 20))
             var uncompSize = Int(Self.u32(header, 24))
             let nameLen = Int(Self.u16(header, 28))
@@ -157,19 +182,25 @@ final class ZipReader {
             var localOff = Int(Self.u32(header, 42))
 
             guard cursor + 46 + nameLen + extraLen + commentLen <= fileSize else { throw ZipError.truncated }
-            let nameData = try readBytes(at: cursor + 46, count: nameLen)
-            let name = decodeName(nameData)
+            // 名字与扩展字段一次读出来：一万多个条目时省掉一半随机读
+            let variableLen = nameLen + extraLen
+            let variable = try readBytes(at: cursor + 46, count: variableLen)
+            let name = decodeName(Data(variable.prefix(nameLen)))
+            let extra = extraLen > 0
+                ? variable.subdata(in: nameLen..<(nameLen + extraLen))
+                : Data()
 
-            // zip64 扩展字段
-            let needsZip64 = compSize == 0xFFFF_FFFF || uncompSize == 0xFFFF_FFFF || localOff == 0xFFFF_FFFF
-            if needsZip64, extraLen > 0 {
-                let extra = try readBytes(at: cursor + 46 + nameLen, count: extraLen)
+            var method = recordedMethod
+            var aesKeyBits: Int?
+
+            if extraLen > 0 {
+                let needsZip64 = compSize == 0xFFFF_FFFF || uncompSize == 0xFFFF_FFFF || localOff == 0xFFFF_FFFF
                 var e = 0
                 while e + 4 <= extraLen {
                     let tag = Self.u16(extra, e)
                     let size = Int(Self.u16(extra, e + 2))
                     guard e + 4 + size <= extraLen else { break }
-                    if tag == 0x0001 {
+                    if tag == 0x0001, needsZip64 {
                         var p = e + 4
                         if uncompSize == 0xFFFF_FFFF, p + 8 <= e + 4 + size {
                             uncompSize = Int(Self.u64(extra, p)); p += 8
@@ -180,7 +211,11 @@ final class ZipReader {
                         if localOff == 0xFFFF_FFFF, p + 8 <= e + 4 + size {
                             localOff = Int(Self.u64(extra, p)); p += 8
                         }
-                        break
+                    } else if tag == 0x9901, size >= 7 {
+                        // WinZip AES：版本(2) "AE"(2) 强度(1) 真实压缩方式(2)
+                        let strength = extra[extra.startIndex + e + 8]
+                        method = Self.u16(extra, e + 9)
+                        aesKeyBits = strength == 3 ? 256 : (strength == 2 ? 192 : 128)
                     }
                     e += 4 + size
                 }
@@ -192,7 +227,11 @@ final class ZipReader {
                     method: method,
                     compressedSize: compSize,
                     uncompressedSize: uncompSize,
-                    localHeaderOffset: localOff
+                    localHeaderOffset: localOff,
+                    flags: flags,
+                    crc32: crc,
+                    dosTime: dosTime,
+                    aesKeyBits: aesKeyBits
                 )
             )
             cursor += 46 + nameLen + extraLen + commentLen
@@ -220,19 +259,68 @@ final class ZipReader {
         return start
     }
 
+    /// 解出「真实载荷」的范围，加密条目顺带建好解密器。
+    ///
+    /// 加密包的前置开销（ZipCrypto 的 12 字节头、AES 的 salt + 校验值）和尾部 MAC
+    /// 都在这里剥掉，后面的解压/落盘代码看到的就是一段纯密文。
+    private func payload(_ entry: ZipEntry) throws
+        -> (start: Int, length: Int, decryptor: ZipDecryptor?) {
+        let start = try dataStart(of: entry)
+        guard entry.isEncrypted else { return (start, entry.compressedSize, nil) }
+        guard let password, !password.isEmpty else { throw ZipError.passwordRequired }
+
+        if let bits = entry.aesKeyBits {
+            let saltLen = bits == 256 ? 16 : 8
+            let overhead = saltLen + 2 + 10
+            guard entry.compressedSize >= overhead else { throw ZipError.badEntry(entry.name) }
+
+            let head = try readBytes(at: start, count: saltLen + 2)
+            let salt = Array(head.prefix(saltLen))
+            let verifier = Array(head.suffix(2))
+            guard let keys = ZipAES.derive(password: password, salt: salt, keyBits: bits) else {
+                throw ZipError.unsupportedCipher
+            }
+            // 2 字节校验值：密码错了这里就拦住，不用等 inflate 失败
+            guard keys.verifier == verifier else { throw ZipError.wrongPassword }
+            guard let aes = AESCTRStream(key: keys.encKey) else { throw ZipError.unsupportedCipher }
+
+            let payloadLen = entry.compressedSize - overhead
+            let mac = Array(try readBytes(at: start + saltLen + 2 + payloadLen, count: 10))
+            return (start + saltLen + 2, payloadLen,
+                    ZipDecryptor(aes: aes, hmac: SHA1HMAC(key: keys.authKey), mac: mac))
+        }
+
+        guard entry.compressedSize > 12 else { throw ZipError.badEntry(entry.name) }
+        let stream = ZipCryptoStream(password: password)
+        var probe = Array(try readBytes(at: start, count: 12))
+        stream.decrypt(&probe, 12)
+        let expected = ZipCryptoStream.checkByte(
+            crc: entry.crc32,
+            dosTime: entry.dosTime,
+            usesDescriptor: entry.flags & 0x0008 != 0
+        )
+        guard probe[11] == expected else { throw ZipError.wrongPassword }
+        return (start + 12, entry.compressedSize - 12, ZipDecryptor(zip: stream))
+    }
+
     // MARK: - 读取
 
     func read(_ entry: ZipEntry) throws -> Data {
-        let start = try dataStart(of: entry)
+        let info = try payload(entry)
         let size = entry.uncompressedSize
         // 兜底上限：单个条目超过 512 MB 就不整块进内存了（游戏里不会有这种文件）
         guard size <= 512 << 20 else { throw ZipError.inflateFailed(entry.name) }
 
         switch entry.method {
         case 0:
-            return try readBytes(at: start, count: entry.compressedSize)
+            var bytes = Array(try readBytes(at: info.start, count: info.length))
+            if let d = info.decryptor {
+                d.consume(&bytes)
+                try d.verifyMAC()
+            }
+            return Data(bytes)
         case 8:
-            return try inflateFully(start: start, compressedSize: entry.compressedSize,
+            return try inflateFully(start: info.start, length: info.length, decryptor: info.decryptor,
                                     expected: size, name: entry.name)
         default:
             throw ZipError.unsupportedMethod(entry.method)
@@ -244,37 +332,43 @@ final class ZipReader {
         return String(data: d, encoding: .utf8)
     }
 
-    /// 只取条目前若干字节（读 pck 头这类场景），不解压整个条目
+    /// 只取条目前若干字节（读 pck 头这类场景），不解压整个条目。
+    /// 前缀读不校验 AES 的尾部 MAC —— 没有读完整个载荷，校验值天然对不上。
     func readPrefix(_ entry: ZipEntry, max: Int = 128) throws -> Data {
-        let start = try dataStart(of: entry)
+        let info = try payload(entry)
         switch entry.method {
         case 0:
-            return try readBytes(at: start, count: min(max, entry.compressedSize))
+            var bytes = Array(try readBytes(at: info.start, count: min(max, info.length)))
+            info.decryptor?.consume(&bytes)
+            return Data(bytes)
         case 8:
             let want = min(max, entry.uncompressedSize)
             guard want > 0 else { return Data() }
-            return try inflatePrefix(start: start, compressedSize: entry.compressedSize,
+            return try inflatePrefix(start: info.start, length: info.length, decryptor: info.decryptor,
                                      want: want, name: entry.name)
         default:
             throw ZipError.unsupportedMethod(entry.method)
         }
     }
 
-    private func inflateFully(start: Int, compressedSize: Int, expected: Int, name: String) throws -> Data {
+    private func inflateFully(start: Int, length: Int, decryptor: ZipDecryptor?,
+                              expected: Int, name: String) throws -> Data {
         guard expected > 0 else { return Data() }
         var output = Data(capacity: expected)
-        try inflateStream(start: start, compressedSize: compressedSize, name: name,
+        try inflateStream(start: start, length: length, decryptor: decryptor, name: name,
                           outCapacity: 512 << 10) { buf, n in
             guard output.count + n <= expected else { throw ZipError.inflateFailed(name) }
             output.append(Data(bytes: buf, count: n))
         }
+        try decryptor?.verifyMAC()
         guard output.count == expected else { throw ZipError.inflateFailed(name) }
         return output
     }
 
-    private func inflatePrefix(start: Int, compressedSize: Int, want: Int, name: String) throws -> Data {
+    private func inflatePrefix(start: Int, length: Int, decryptor: ZipDecryptor?,
+                               want: Int, name: String) throws -> Data {
         var output = Data()
-        try inflateStream(start: start, compressedSize: compressedSize, name: name,
+        try inflateStream(start: start, length: length, decryptor: decryptor, name: name,
                           outCapacity: min(max(want, 4096), 256 << 10), stopAfter: want) { buf, n in
             output.append(Data(bytes: buf, count: n))
         }
@@ -284,8 +378,10 @@ final class ZipReader {
     }
 
     /// 流式解压：每解出一块就回调，回调返回后继续。
+    /// 加密条目先在原地解密（HMAC 按密文累计），再喂给 inflater。
     private func inflateStream(start: Int,
-                               compressedSize: Int,
+                               length: Int,
+                               decryptor: ZipDecryptor?,
                                name: String,
                                outCapacity: Int,
                                stopAfter: Int? = nil,
@@ -295,17 +391,18 @@ final class ZipReader {
 
         let inChunk = 256 << 10
         var readCursor = start
-        let end = start + compressedSize
+        let end = start + length
         var outBuffer = [UInt8](repeating: 0, count: outCapacity)
         var produced = 0
         var finished = false
 
         while readCursor < end, !finished {
             let n = min(inChunk, end - readCursor)
-            let data = try readBytes(at: readCursor, count: n)
+            var chunk = Array(try readBytes(at: readCursor, count: n))
             readCursor += n
+            decryptor?.consume(&chunk)
 
-            try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            try chunk.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
                 guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
                 var fed = 0
                 while fed < n, !finished {
@@ -330,7 +427,7 @@ final class ZipReader {
         }
 
         if !finished, let limit = stopAfter, produced >= limit { finished = true }
-        if !finished, compressedSize > 0 { throw ZipError.inflateFailed(name) }
+        if !finished, length > 0 { throw ZipError.inflateFailed(name) }
     }
 
     // MARK: - 落盘
@@ -349,7 +446,7 @@ final class ZipReader {
             throw ZipError.badEntry(entry.name)
         }
 
-        let start = try dataStart(of: entry)
+        let info = try payload(entry)
         let handle = try FileHandle(forWritingTo: destination)
         defer { try? handle.close() }
         let fd = handle.fileDescriptor
@@ -357,14 +454,15 @@ final class ZipReader {
         switch entry.method {
         case 0:
             let chunk = 4 << 20
-            var cursor = start
-            let end = start + entry.compressedSize
+            var cursor = info.start
+            let end = info.start + info.length
             while cursor < end {
                 let stop = min(cursor + chunk, end)
                 // 每块一个 autorelease 池：FileHandle/Data 的临时对象不能
                 // 攒到整个包解完才释放（3 GB 包会直接顶到 jetsam）。
                 try autoreleasepool {
-                    let data = try readBytes(at: cursor, count: stop - cursor)
+                    var data = Array(try readBytes(at: cursor, count: stop - cursor))
+                    info.decryptor?.consume(&data)
                     try data.withUnsafeBytes { raw in
                         guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
                         try Self.writeAll(fd: fd, base, data.count)
@@ -373,12 +471,14 @@ final class ZipReader {
                 }
                 cursor = stop
             }
+            try info.decryptor?.verifyMAC()
         case 8:
-            try inflateStream(start: start, compressedSize: entry.compressedSize,
+            try inflateStream(start: info.start, length: info.length, decryptor: info.decryptor,
                               name: entry.name, outCapacity: 512 << 10) { buf, n in
                 try Self.writeAll(fd: fd, buf, n)
                 onBytes?(n)
             }
+            try info.decryptor?.verifyMAC()
         default:
             throw ZipError.unsupportedMethod(entry.method)
         }
@@ -460,5 +560,42 @@ final class ZipReader {
         guard !prefix.isEmpty else { return name }
         guard name.lowercased().hasPrefix(prefix.lowercased()) else { return nil }
         return String(name.dropFirst(prefix.count))
+    }
+}
+
+/// 一个加密条目的解密状态机：要么 ZipCrypto、要么 AES-CTR，两者都是等长流。
+final class ZipDecryptor {
+    private let zipStream: ZipCryptoStream?
+    private let aesStream: AESCTRStream?
+    private let hmac: SHA1HMAC?
+    private let expectedMAC: [UInt8]?
+
+    init(zip: ZipCryptoStream? = nil, aes: AESCTRStream? = nil,
+         hmac: SHA1HMAC? = nil, mac: [UInt8]? = nil) {
+        self.zipStream = zip
+        self.aesStream = aes
+        self.hmac = hmac
+        self.expectedMAC = mac
+    }
+
+    /// 密文原地解密。HMAC 必须喂**密文**，所以顺序不能反。
+    func consume(_ bytes: inout [UInt8]) {
+        guard !bytes.isEmpty else { return }
+        hmac?.update(bytes, bytes.count)
+        if let zipStream {
+            zipStream.decrypt(&bytes, bytes.count)
+        } else if let aesStream {
+            aesStream.decrypt(&bytes, bytes.count)
+        }
+    }
+
+    /// 整个载荷读完后校验 AES 的 10 字节 HMAC；ZipCrypto 没有完整性校验，直接过。
+    func verifyMAC() throws {
+        guard let hmac else { return }
+        guard let expectedMAC else { return }
+        let digest = hmac.finalize()
+        if Array(digest.prefix(expectedMAC.count)) != expectedMAC {
+            throw ZipError.wrongPassword
+        }
     }
 }

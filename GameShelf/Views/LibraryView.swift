@@ -13,6 +13,8 @@ struct LibraryView: View {
     @State private var renaming: GameRecord?
     @State private var filter: LibFilter = .all
     @State private var searching = false
+    /// 加密包的解压密码输入（不落盘，导入结束即丢弃）
+    @State private var passwordInput = ""
 
     enum LayoutMode: Hashable {
         case grid, list
@@ -120,6 +122,25 @@ struct LibraryView: View {
                 }
             } message: {
                 Text("这个包里有多个网页入口，请选择要导入的那一个")
+            }
+            .alert("压缩包已加密", isPresented: Binding(
+                get: { store.passwordPrompt != nil },
+                set: { if !$0 { store.cancelPassword() } }
+            )) {
+                SecureField("解压密码", text: $passwordInput)
+                Button("取消", role: .cancel) {
+                    passwordInput = ""
+                    store.cancelPassword()
+                }
+                Button("解包") {
+                    let pwd = passwordInput
+                    passwordInput = ""
+                    store.submitPassword(pwd)
+                }
+            } message: {
+                Text(store.passwordPrompt?.failed == true
+                     ? "密码不正确，请重新输入"
+                     : "这个包设置了密码，输入后才能解包导入")
             }
             .onAppear {
                 CoverStore.shared.migrateCropsIfNeeded()
