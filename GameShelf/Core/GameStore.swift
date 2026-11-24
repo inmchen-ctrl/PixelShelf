@@ -342,7 +342,7 @@ final class GameStore: ObservableObject {
         // 否则大包在「扫描包结构」这一步就已经读不到了。
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        guard let reader = try? ZipReader(url: url) else { return (false, []) }
+        guard let reader = try? Self.makeReader(url: url, password: nil) else { return (false, []) }
         return (PackageInspector.requiresPassword(reader), PackageInspector.scanRoots(reader))
     }
 
@@ -449,6 +449,17 @@ final class GameStore: ObservableObject {
 
     /// 返回：记录 + 从包里抠出来的应用图标（没有则为 nil）。
     /// 图标在外面落到封面库里，作为"还没玩过时"的封面。
+    /// 按扩展名挑具体的归档实现。7z 走 LZMA SDK，其余（zip / apk）走自研的 ZIP 解析。
+    /// 加密只对 ZIP 生效，7z 的加密包会在打开后由 SevenZipReader 给出可读提示。
+    nonisolated static func makeReader(url: URL, password: String?) throws -> any ArchiveReader {
+        if url.pathExtension.lowercased() == "7z" {
+            return try SevenZipReader(url: url)
+        }
+        let reader = try ZipReader(url: url)
+        reader.password = password
+        return reader
+    }
+
     nonisolated static func process(
         url: URL,
         into gamesRoot: URL,
@@ -468,8 +479,7 @@ final class GameStore: ObservableObject {
             )
         }
 
-        let reader = try ZipReader(url: url)
-        reader.password = password
+        let reader = try Self.makeReader(url: url, password: password)
         let result = PackageInspector.inspect(reader, forcedRoot: rootOverride)
 
         do {
@@ -503,7 +513,7 @@ final class GameStore: ObservableObject {
             }
 
             let mainName = reader.entries[mainIndex].name
-            let rel = ZipReader.relativePath(mainName, stripping: result.root)
+            let rel = ArchivePath.relative(mainName, stripping: result.root)
                 ?? (mainName as NSString).lastPathComponent
             try FlashRuntime.install(into: target, title: title, swfPath: rel)
             progress(ImportProgress(stage: .extracting, done: 1, total: 1))
@@ -576,10 +586,10 @@ final class GameStore: ObservableObject {
         // 网页游戏只需要静态资源：桌面启动器（nw.dll / *.exe / locales / MTool…）
         // 在 iOS 上一行都用不到，却占掉一半体积和解包时间。直接跳过。
         let all = result.gameEntries.map { reader.entries[$0] }
-        var selected: [ZipEntry] = []
+        var selected: [ArchiveEntry] = []
         var skippedBytes: Int64 = 0
         for entry in all {
-            let rel = ZipReader.relativePath(entry.name, stripping: result.root) ?? entry.name
+            let rel = ArchivePath.relative(entry.name, stripping: result.root) ?? entry.name
             if Self.isLauncherJunk(rel) {
                 // 例外：MTool/ 里的 json 可能就是翻译字典。留着，用户能在
                 // 游戏卡里直接挑；不带它的话这个目录整个被跳过就没得选了。
@@ -617,7 +627,7 @@ final class GameStore: ObservableObject {
         return (GameRecord(
             title: title,
             folderName: folderName,
-            entryFile: ZipReader.relativePath(result.entryFile, stripping: result.root)
+            entryFile: ArchivePath.relative(result.entryFile, stripping: result.root)
                 ?? (result.entryFile.isEmpty ? "index.html" : result.entryFile),
             engine: result.engine,
             status: result.status,

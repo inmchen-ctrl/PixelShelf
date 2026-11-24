@@ -334,7 +334,7 @@ final class CoverStore: ObservableObject {
     /// Android 的启动图标在 res/mipmap-*（老式）或 mipmap-anydpi-v26 + 前景图（自适应）里。
     /// 自适应图标是 XML，真正能显示的位图叫 ic_launcher_foreground，
     /// 所以按名字打分比按路径猜靠得住。
-    nonisolated static func iconData(from reader: ZipReader) -> Data? {
+    nonisolated static func iconData(from reader: any ArchiveReader) -> Data? {
         struct Candidate {
             let index: Int
             let score: Int

@@ -13,7 +13,7 @@ enum ApkLabel {
     // MARK: - 对外入口
 
     /// 从已经打开的 APK 里取应用名
-    static func read(from reader: ZipReader) -> String? {
+    static func read(from reader: any ArchiveReader) -> String? {
         guard let manifestEntry = reader.entries.first(where: {
             $0.name == "AndroidManifest.xml" || $0.name.hasSuffix("/AndroidManifest.xml")
         }), let manifest = try? reader.read(manifestEntry) else { return nil }

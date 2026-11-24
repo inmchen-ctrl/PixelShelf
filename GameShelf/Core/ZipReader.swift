@@ -1,28 +1,5 @@
 import Foundation
 
-struct ZipEntry {
-    let name: String
-    /// 实际压缩方式：0 存储 / 8 deflate。AES 条目在目录里写的是 99，
-    /// 真实方法藏在 0x9901 扩展字段里，这里已经换回来。
-    let method: UInt16
-    /// 目录里记录的压缩后大小。AES 条目包含 salt + 2 字节校验值 + 10 字节 MAC。
-    let compressedSize: Int
-    let uncompressedSize: Int
-    let localHeaderOffset: Int
-    let flags: UInt16
-    let crc32: UInt32
-    let dosTime: UInt16
-    /// 非 nil 表示 WinZip AES，值为密钥位数（128 / 192 / 256）
-    let aesKeyBits: Int?
-
-    var isDirectory: Bool { name.hasSuffix("/") }
-    var isEncrypted: Bool { flags & 0x0001 != 0 }
-    var isAES: Bool { aesKeyBits != nil }
-
-    /// AES 的额外开销：salt + 2 字节密码校验 + 10 字节 HMAC
-    var aesOverhead: Int { (aesKeyBits == 256 ? 16 : 8) + 2 + 10 }
-}
-
 enum ZipError: LocalizedError {
     case notZip
     case truncated
@@ -52,10 +29,10 @@ enum ZipError: LocalizedError {
 /// 全程走 `FileHandle` 随机读 + zlib 流式解压，**不把整包读进内存**——
 /// 2~3 GB 的游戏包用 `Data(contentsOf:)` 会直接把进程顶到 jetsam，
 /// 或者让文件的页缓存和写入互相挤。
-final class ZipReader {
+final class ZipReader: ArchiveReader {
     private let handle: FileHandle
     private let fileSize: Int
-    private(set) var entries: [ZipEntry] = []
+    private(set) var entries: [ArchiveEntry] = []
 
     /// 加密包的密码。导入前由调用方设进来；为 nil 时读到加密条目会抛 `.passwordRequired`。
     var password: String?
@@ -222,7 +199,7 @@ final class ZipReader {
             }
 
             entries.append(
-                ZipEntry(
+                ArchiveEntry(
                     name: name,
                     method: method,
                     compressedSize: compSize,
@@ -247,7 +224,7 @@ final class ZipReader {
     // MARK: - 条目定位
 
     /// 返回压缩数据在文件里的起点
-    private func dataStart(of entry: ZipEntry) throws -> Int {
+    private func dataStart(of entry: ArchiveEntry) throws -> Int {
         let off = entry.localHeaderOffset
         guard off >= 0, off + 30 <= fileSize else { throw ZipError.badEntry(entry.name) }
         let header = try readBytes(at: off, count: 30)
@@ -263,7 +240,7 @@ final class ZipReader {
     ///
     /// 加密包的前置开销（ZipCrypto 的 12 字节头、AES 的 salt + 校验值）和尾部 MAC
     /// 都在这里剥掉，后面的解压/落盘代码看到的就是一段纯密文。
-    private func payload(_ entry: ZipEntry) throws
+    private func payload(_ entry: ArchiveEntry) throws
         -> (start: Int, length: Int, decryptor: ZipDecryptor?) {
         let start = try dataStart(of: entry)
         guard entry.isEncrypted else { return (start, entry.compressedSize, nil) }
@@ -305,7 +282,7 @@ final class ZipReader {
 
     // MARK: - 读取
 
-    func read(_ entry: ZipEntry) throws -> Data {
+    func read(_ entry: ArchiveEntry) throws -> Data {
         let info = try payload(entry)
         let size = entry.uncompressedSize
         // 兜底上限：单个条目超过 512 MB 就不整块进内存了（游戏里不会有这种文件）
@@ -327,14 +304,14 @@ final class ZipReader {
         }
     }
 
-    func text(_ entry: ZipEntry, limit: Int = 400_000) -> String? {
+    func text(_ entry: ArchiveEntry, limit: Int = 400_000) -> String? {
         guard entry.uncompressedSize <= limit, let d = try? read(entry) else { return nil }
         return String(data: d, encoding: .utf8)
     }
 
     /// 只取条目前若干字节（读 pck 头这类场景），不解压整个条目。
     /// 前缀读不校验 AES 的尾部 MAC —— 没有读完整个载荷，校验值天然对不上。
-    func readPrefix(_ entry: ZipEntry, max: Int = 128) throws -> Data {
+    func readPrefix(_ entry: ArchiveEntry, max: Int = 128) throws -> Data {
         let info = try payload(entry)
         switch entry.method {
         case 0:
@@ -433,7 +410,7 @@ final class ZipReader {
     // MARK: - 落盘
 
     /// 把单个条目写到指定路径；边解边写，内存占用固定。
-    func extract(_ entry: ZipEntry, to destination: URL, onBytes: ((Int) -> Void)? = nil) throws {
+    func extract(_ entry: ArchiveEntry, to destination: URL, onBytes: ((Int) -> Void)? = nil) throws {
         let fm = FileManager.default
         try fm.createDirectory(
             at: destination.deletingLastPathComponent(),
@@ -501,7 +478,7 @@ final class ZipReader {
     /// 把指定条目解到目录下，prefix 会被剥掉。返回写入文件数。
     /// progress 回调：(已写字节, 总字节)，在后台线程调用；内部按 0.4% 节流。
     @discardableResult
-    func extract(_ selected: [ZipEntry],
+    func extract(_ selected: [ArchiveEntry],
                  stripping prefix: String,
                  to directory: URL,
                  progress: ((Int64, Int64) -> Void)? = nil) throws -> Int {
@@ -530,7 +507,7 @@ final class ZipReader {
             // 一个文件一个 autorelease 池：一万五千个文件如果共用线程池，
             // Foundation 的临时对象会一路堆到导入结束（真机上就是闪退）。
             try autoreleasepool {
-                guard let relative = Self.relativePath(entry.name, stripping: prefix) else { return }
+                guard let relative = ArchivePath.relative(entry.name, stripping: prefix) else { return }
                 if relative.isEmpty { return }
                 if relative.contains("..") { return }
                 if relative.hasPrefix("__MACOSX") { return }
@@ -556,11 +533,6 @@ final class ZipReader {
         return written
     }
 
-    static func relativePath(_ name: String, stripping prefix: String) -> String? {
-        guard !prefix.isEmpty else { return name }
-        guard name.lowercased().hasPrefix(prefix.lowercased()) else { return nil }
-        return String(name.dropFirst(prefix.count))
-    }
 }
 
 /// 一个加密条目的解密状态机：要么 ZipCrypto、要么 AES-CTR，两者都是等长流。

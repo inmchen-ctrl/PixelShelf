@@ -86,7 +86,7 @@ enum PckBuilder {
     ///   - target: 输出的 .pck
     static func rebuild(
         sparse blob: Data,
-        reader: ZipReader,
+        reader: any ArchiveReader,
         loosePrefix: String,
         to target: URL,
         progress: (Double) -> Void = { _ in }

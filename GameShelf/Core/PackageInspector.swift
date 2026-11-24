@@ -92,7 +92,7 @@ enum PackageInspector {
     /// 3. 排掉广告壳（`isJunk`）、按信号打分；**明显只有一个真游戏时直接定它**，
     ///    分数接近才把候选交回给用户选。
     /// 4. 排序：分数高的在前，同分取目录浅的。
-    static func scanRoots(_ reader: ZipReader) -> [RootCandidate] {
+    static func scanRoots(_ reader: any ArchiveReader) -> [RootCandidate] {
         let names = reader.entries.map { $0.name }
         let lower = names.map { $0.lowercased() }
         var byLower: [String: Int] = [:]
@@ -177,11 +177,11 @@ enum PackageInspector {
     }
 
     /// 包里有没有加密条目。只看中央目录的标志位，不需要密码。
-    static func requiresPassword(_ reader: ZipReader) -> Bool {
+    static func requiresPassword(_ reader: any ArchiveReader) -> Bool {
         reader.entries.contains { $0.isEncrypted }
     }
 
-    static func inspect(_ reader: ZipReader, forcedRoot: String? = nil) -> Inspection {
+    static func inspect(_ reader: any ArchiveReader, forcedRoot: String? = nil) -> Inspection {
         let names = reader.entries.map { $0.name }
         let lower = names.map { $0.lowercased() }
         var index: [String: Int] = [:]

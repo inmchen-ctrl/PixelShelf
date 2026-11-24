@@ -18,6 +18,7 @@ SPDX-License-Identifier: MIT
 - `Engine/mkxp-ios/` 及其静态库 —— mkxp-z（GPL-2.0）及 SDL2、ANGLE、FreeType 等依赖
 - `GameShelf/Resources/godot-*-web.zip` —— Godot Engine（MIT）
 - `GameShelf/Resources/ruffle-web.zip` —— Ruffle（MIT 或 Apache-2.0）
+- `GameShelf/Core/SevenZip/` —— LZMA SDK（公有领域，7z 解压）
 - `GameShelf/Resources/bg-diamante.png` —— 界面底纹，作者自有素材
 
 ## 运行时引擎
@@ -28,6 +29,16 @@ SPDX-License-Identifier: MIT
 | Godot Engine（Web 导出运行时） | 4.5 / 4.6 | MIT | https://github.com/godotengine/godot |
 | Ruffle（Flash / SWF，WebAssembly） | 随包 | MIT 或 Apache-2.0 | https://github.com/ruffle-rs/ruffle |
 | Ruby（由 mkxp-z 内嵌） | 1.8 / 1.9 / 3.1 | Ruby License / GPL-2.0 | https://www.ruby-lang.org |
+
+## 归档解码
+
+| 组件 | 版本 | 许可证 | 上游 |
+| --- | --- | --- | --- |
+| LZMA SDK（7z 容器与 LZMA / LZMA2 / PPMd / BCJ / Delta 解码） | 26.06 | **公有领域**（每个源文件头均标注 `Igor Pavlov : Public domain`） | https://www.7-zip.org/sdk.html |
+
+只取了 SDK 里解压所需的最小集合，放在 `GameShelf/Core/SevenZip/`；不含 7-Zip 应用本体，
+也不含任何 RAR 相关代码（那部分带 unRAR 限制条款）。ZIP 的解析与解密是本仓库自研，
+不依赖 zlib 之外的第三方。
 
 ## 图形与多媒体
 

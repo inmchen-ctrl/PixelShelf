@@ -238,7 +238,7 @@ enum GameTranslation {
     /// 里面若放的是字典就会被一起丢掉。这里按中央目录挑候选，
     /// 只解出真正是「原文 → 译文」的那一个。
     @discardableResult
-    static func adopt(from reader: ZipReader, root: String, into gameDir: URL) -> Info? {
+    static func adopt(from reader: any ArchiveReader, root: String, into gameDir: URL) -> Info? {
         // 已经有用户选择（含「关掉」）就不动
         guard !FileManager.default.fileExists(atPath: gameDir.appendingPathComponent(metaName).path),
               !FileManager.default.fileExists(atPath: gameDir.appendingPathComponent(fileName).path) else {
@@ -246,7 +246,7 @@ enum GameTranslation {
         }
 
         let prefix = root + "mtool/"
-        var picks: [ZipEntry] = []
+        var picks: [ArchiveEntry] = []
 
         for entry in reader.entries where !entry.isDirectory {
             let lower = entry.name.lowercased()
@@ -264,7 +264,7 @@ enum GameTranslation {
             }
         }
 
-        var best: (ZipEntry, [String: String])?
+        var best: (ArchiveEntry, [String: String])?
         for entry in picks {
             guard let data = try? reader.read(entry),
                   let dict = parseDictionary(data, minEntries: minEntries) else { continue }
@@ -277,7 +277,7 @@ enum GameTranslation {
         do {
             let data = try JSONSerialization.data(withJSONObject: dict, options: [])
             try data.write(to: gameDir.appendingPathComponent(fileName), options: .atomic)
-            let rel = ZipReader.relativePath(source.name, stripping: root) ?? source.name
+            let rel = ArchivePath.relative(source.name, stripping: root) ?? source.name
             writeMeta(Meta(enabled: true, sourceName: rel, origin: .inline, mountedAt: Date()),
                       in: gameDir)
             DiagLog.append("[GS-TRANS] adopted \(source.name) -> \(dict.count) entries")

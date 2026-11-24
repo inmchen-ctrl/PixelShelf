@@ -12,6 +12,15 @@ struct LibraryView: View {
     @State private var showError = false
     @State private var renaming: GameRecord?
     @State private var filter: LibFilter = .all
+    /// 可导入的容器：zip / apk，以及 7z
+    private static let importableTypes: [UTType] = {
+        var types: [UTType] = [.zip, .data]
+        if let sevenZip = UTType(filenameExtension: "7z") {
+            types.insert(sevenZip, at: 0)
+        }
+        return types
+    }()
+
     @State private var searching = false
     /// 加密包的解压密码输入（不落盘，导入结束即丢弃）
     @State private var passwordInput = ""
@@ -64,12 +73,12 @@ struct LibraryView: View {
             }
             .fileImporter(
                 isPresented: $showImporter,
-                allowedContentTypes: [.zip, .data],
+                allowedContentTypes: Self.importableTypes,
                 allowsMultipleSelection: true
             ) { result in
                 switch result {
                 case .success(let urls):
-                    // 和 APK 完全一样的处理：直接入队，由 GameStore 用 ZipReader 打开。
+                    // 和 APK 完全一样的处理：直接入队，由 GameStore 按扩展名挑归档实现。
                     // 不额外拷贝、不经 Inbox、不做文件协调——那条更复杂的路反而会失败。
                     enqueue(urls)
                 case .failure(let error):

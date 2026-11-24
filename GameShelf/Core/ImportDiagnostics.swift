@@ -14,7 +14,7 @@ enum ImportDiagnostics {
         return dir.appendingPathComponent("import-debug.txt")
     }
 
-    nonisolated static func record(url: URL, reader: ZipReader, result: Inspection) {
+    nonisolated static func record(url: URL, reader: any ArchiveReader, result: Inspection) {
         #if DEBUG
         let names = reader.entries.map { $0.name }
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
