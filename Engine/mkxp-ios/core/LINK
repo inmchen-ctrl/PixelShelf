@@ -1,0 +1,10 @@
+-Wl,-force_load,lib/libmkxpz-core.a lib/mkxp18-merged.o lib/mkxp19-merged.o lib/mkxp31-merged.o
+-Llib -lSDL2 -lSDL2_image -lSDL2_sound -lSDL2_ttf -lfreetype -lpixman-1
+-logg -lvorbis -lvorbisfile -ltheora -ltheoradec -lphysfs -luchardet
+-lopenal -lfluidsynth -lssl -lcrypto -lz -lbz2 -liconv
+-lANGLE_static -lEGL_static -lGLESv2_static
+-framework Foundation -framework UIKit -framework CoreFoundation
+-framework CoreGraphics -framework CoreVideo -framework CoreAudio
+-framework AudioToolbox -framework AVFoundation -framework Metal
+-framework QuartzCore -framework GameController -framework CoreMotion
+-framework IOSurface -weak_framework CoreBluetooth -weak_framework CoreHaptics

@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM/
+timeline.xctimeline
+playground.xcworkspace
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# 引擎构建产物（由 Engine/mkxp-ios/build-mkxp-ios.sh 生成，不入库）
+Engine/mkxp-ios/build/
+
+# RPG Maker RTP 素材：版权归 KADOKAWA / Enterbrain，只允许随 RPG Maker 游戏分发。
+# 本地可保留（构建出带 RTP 的完整包），但不入库、不对外分发。
+# 需要时从你自己的 RPG Maker 安装目录或游戏包内取得。
+Engine/mkxp-ios/core/Assets.bundle/RTP/
+
+# 运行时诊断日志（App 沙盒外落盘时可能残留）
+gs_diag.log
+*.log
