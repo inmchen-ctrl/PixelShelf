@@ -71,19 +71,14 @@ struct LibraryView: View {
                     importingOverlay
                 }
             }
-            .fileImporter(
-                isPresented: $showImporter,
-                allowedContentTypes: Self.importableTypes,
-                allowsMultipleSelection: true
-            ) { result in
-                switch result {
-                case .success(let urls):
-                    // 和 APK 完全一样的处理：直接入队，由 GameStore 按扩展名挑归档实现。
-                    // 不额外拷贝、不经 Inbox、不做文件协调——那条更复杂的路反而会失败。
+            .sheet(isPresented: $showImporter) {
+                // 不用 fileImporter：它走原地打开，自签安装时校验链会断、
+                // 文件看得见却点不动。DocumentPicker 是拷贝模式，见它的注释。
+                DocumentPicker(
+                    contentTypes: Self.importableTypes,
+                    allowsMultipleSelection: true
+                ) { urls in
                     enqueue(urls)
-                case .failure(let error):
-                    store.lastError = error.localizedDescription
-                    showError = true
                 }
             }
             .sheet(item: $selected) { game in
